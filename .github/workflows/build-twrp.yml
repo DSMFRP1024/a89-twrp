@@ -1,0 +1,142 @@
+name: Build TWRP - BIHEE A89
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    env:
+      DEVICE_TREE: https://github.com/${{ github.repository }}
+      DEVICE_BRANCH: main
+      DEVICE_PATH: device/unisoc/ums9157_2h10
+      MANIFEST_URL: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
+      MANIFEST_BRANCH: twrp-12.1
+      LUNCH_TARGET: twrp_ums9157_2h10-eng
+
+    steps:
+      - name: Show initial disk space
+        run: |
+          echo "=== BEFORE CLEANUP ==="
+          df -h /
+          free -h
+
+      - name: Maximize free disk space
+        run: |
+          set -e
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo rm -rf /usr/share/swift 2>/dev/null || true
+          sudo rm -rf /usr/lib/jvm/temurin-* 2>/dev/null || true
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          echo "=== AFTER CLEANUP ==="
+          df -h /
+
+      - name: Add swap (8 GB)
+        run: |
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1G count=8
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          sudo swapon --show
+          free -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git gnupg gperf \
+            lib32ncurses5-dev lib32readline-dev lib32z1-dev \
+            liblz4-tool libncurses5-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop \
+            pngcrush rsync schedtool squashfs-tools xsltproc \
+            zip zlib1g-dev python3 python3-pip unzip \
+            openjdk-11-jdk-headless
+          echo "=== DISK AFTER DEPS ==="
+          df -h /
+
+      - name: Install repo tool
+        run: |
+          mkdir -p ~/bin
+          curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+          git config --global user.name "builder"
+          git config --global user.email "builder@example.com"
+          git config --global color.ui false
+
+      - name: Initialize TWRP source tree
+        run: |
+          mkdir -p ~/twrp && cd ~/twrp
+          repo init --depth=1 --no-repo-verify \
+            -u "$MANIFEST_URL" \
+            -b "$MANIFEST_BRANCH" \
+            -g default,-mips,-darwin,-notdefault
+
+      - name: Sync source (with retries)
+        run: |
+          cd ~/twrp
+          for i in 1 2 3; do
+            echo "===== SYNC ATTEMPT $i ====="
+            if repo sync -c -j$(nproc --all) --no-clone-bundle --no-tags \
+                --optimized-fetch --prune --force-sync; then
+              echo "SYNC OK"
+              break
+            fi
+            echo "sync attempt $i failed, retrying..."
+            sleep 10
+          done
+          echo "=== DISK AFTER SYNC ==="
+          df -h /
+          du -sh ~/twrp 2>/dev/null || true
+
+      - name: Clone device tree
+        run: |
+          cd ~/twrp
+          git clone --depth=1 -b "$DEVICE_BRANCH" "$DEVICE_TREE" "$DEVICE_PATH"
+          ls -la "$DEVICE_PATH"
+
+      - name: Build recovery
+        run: |
+          cd ~/twrp
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export LC_ALL=C
+          export BUILD_NUMBER=GITHUB_ACTIONS
+          source build/envsetup.sh
+          lunch "$LUNCH_TARGET"
+          make recoveryimage -j$(nproc --all) 2>&1 | tail -n 200
+
+      - name: Build vendor_boot (best effort)
+        continue-on-error: true
+        run: |
+          cd ~/twrp
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export LC_ALL=C
+          source build/envsetup.sh
+          lunch "$LUNCH_TARGET"
+          make vendorbootimage -j$(nproc --all) 2>&1 | tail -n 60 || \
+            make vendor_bootimage -j$(nproc --all) 2>&1 | tail -n 60 || true
+
+      - name: List build output
+        run: |
+          ls -la ~/twrp/out/target/product/ums9157_2h10/ | grep -E "\.img$|ramdisk" || true
+          echo "=== DISK AFTER BUILD ==="
+          df -h /
+
+      - name: Upload images
+        uses: actions/upload-artifact@v4
+        with:
+          name: twrp-a89-images
+          path: /home/runner/twrp/out/target/product/ums9157_2h10/*.img
+          if-no-files-found: error
+          retention-days: 30
