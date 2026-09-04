@@ -41,15 +41,6 @@ jobs:
           echo "=== AFTER CLEANUP ==="
           df -h /
 
-      - name: Add swap (8 GB)
-        run: |
-          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1G count=8
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          sudo swapon --show
-          free -h
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
